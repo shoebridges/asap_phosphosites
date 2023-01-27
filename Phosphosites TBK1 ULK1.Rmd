@@ -1,0 +1,171 @@
+---
+title: "Phospho (STY) sites analysis"
+author: "Stephen Shoebridge, stephen.shoebridge@univie.ac.at"
+date created: "16/12/2021"
+updated date: "18/01/2023"
+output: 
+  html_document:
+    self-contained: TRUE
+---
+
+```{r setup, include=FALSE, echo=FALSE}
+library(tidyverse)
+library(plotly)
+library(limma)
+library(readxl)
+library(data.table)
+library(ggbreak)
+library(ggpubr)
+```
+
+# Introduction
+
+In this analysis we analyse the mass spectrometer data provided. We read in a trimmed version of the data and establish the following cut-offs
+
+```{r read files, include=T}
+phospho_data <- read_xlsx("/Users/stephen/Library/CloudStorage/OneDrive-Personal/Martens Lab Onedrive/Bioinformatics/PI3K Phosphorylation/LCMS_report_trimmed.xlsx", sheet = 1)#Take peptide_intensity of Phospho sites
+colnames(phospho_data)#Names of each column
+metadata <- column_to_rownames(read_xlsx("/Users/stephen/Library/CloudStorage/OneDrive-Personal/Martens Lab Onedrive/Bioinformatics/PI3K Phosphorylation/Phosphosite_metadata.xlsx"), "Label")
+head(metadata)#Labels broken down into data fields
+```
+
+The data frame contains the peptide intensity for the TBK1 and ULK1 samples. The metadata contains a breakdown of the sample labels.
+
+# Cutoffs
+
+In the phospho site data, the following cut-offs will be applied
+
+-   If the sum of the row of the peptide is equal to 0, it will be excluded
+
+-   If the peptides score is less than 90 it is excluded
+
+-   All samples with a score between 90-100 are labelled with a low-score warning in the metadata
+
+```{r Cutoffs, echo=F}
+phospho_sel <- subset(phospho_data, rowSums(phospho_data[, 19:46])>0)
+phospho_sel <- subset(phospho_sel, phospho_sel$Score>90)
+paste0("Number of rows before cutoff: ", nrow(phospho_data), "     Number of rows after cutoff: ", nrow(phospho_sel))
+phospho_sel$Low_Score_Warning <- phospho_sel$Score<100
+table(phospho_sel$Low_Score_Warning); print("7 peptides have a score between 90 and 100")
+phospho_sel <- subset(phospho_sel, phospho_sel$Comments=="OK")#3 removed with bad comments
+```
+
+## Subtracting the baseline
+
+```{r Subtracting tine point 0 from time point 30}
+phospho_sel$pep_label <- 1:nrow(phospho_sel)
+phospho_mat <- column_to_rownames(phospho_sel[,c(19:46, (ncol(phospho_sel)))], "pep_label")#Gives the rows an identifier since no column iD seems unique
+phospho_sel <- column_to_rownames(phospho_sel, "pep_label")#Same for phospho_sel
+metadata$label <- paste0(metadata$User, "_",  metadata$Target, "_",  metadata$Band)
+metadata <- metadata[order(metadata$label, metadata$Time),]
+metadata$sample_name <- rownames(metadata)
+timepoint_0 <- subset(metadata, metadata$Time==0)$sample_name
+timepoint_30 <- subset(metadata, metadata$Time==30)$sample_name
+timepoint_0_mat <- phospho_mat[, timepoint_0]
+timepoint_30_mat <- phospho_mat[, timepoint_30]
+setnames(timepoint_0_mat, old = subset(metadata, metadata$Time=="0")$sample_name, new = subset(metadata, metadata$Time=="0")$label)
+setnames(timepoint_30_mat, old = subset(metadata, metadata$Time=="30")$sample_name, new = subset(metadata, metadata$Time=="30")$label)
+cols <- sort(intersect(names(timepoint_0_mat), names(timepoint_30_mat)))
+setdiff(names(timepoint_0_mat), names(timepoint_30_mat))#Check that no columns have non matching titles
+substr_mat <- timepoint_30_mat[cols]-timepoint_0_mat[cols]
+substr_mat[substr_mat<0] <- NA # Ignores negative values
+phospho_subtr <- cbind(phospho_sel[, c(1:18, 47)], substr_mat)
+```
+
+## Write the cleaned file to csv for later reference
+
+```{r}
+
+#write.csv(phospho_subtr, "~/OneDrive/Martens Lab/R Work/phospho_sites_30sub0.csv")
+colnames(phospho_subtr)
+phospho_subtr_sel <- subset(phospho_subtr, rowSums(phospho_subtr[, 21:33], na.rm = T)>0)#ignores NA and removes rows that have a sum of 0
+nrow(phospho_subtr); nrow(phospho_subtr_sel)
+#phospho_subtr <- read.csv("~/OneDrive/Martens Lab/R Work/phospho_sites_30sub0.csv")
+#write.csv(phospho_subtr_sel, "~/OneDrive/Martens Lab/R Work/phospho_sites_30sub0.csv")
+```
+
+# Plots
+
+## Interactive graphs of the dataset
+
+```{r}
+melt_phospho <- melt(phospho_subtr[,c(1,3,6,7,20:33)], id.vars=c("Proteins", "Positions within proteins", "Protein names", "Gene names"), na.rm = T)
+melt_phospho <- melt_phospho[order(melt_phospho$`Positions within proteins`),]
+melt_phospho$`Positions within proteins` <- gsub(".*;", "", melt_phospho$`Positions within proteins`)#removes N terminal before semi colon (position)
+melt_phospho$`Positions within proteins` <- as.numeric(melt_phospho$`Positions within proteins`)#turns the numbers to numeric
+melt_phospho <- melt_phospho %>% dplyr::arrange(`Positions within proteins`)
+melt_phospho <- melt_phospho[order(as.numeric(melt_phospho$`Positions within proteins`)),]
+melt_phospho$`Gene names` <- ifelse(is.na(melt_phospho$`Gene names`), melt_phospho$Proteins, melt_phospho$`Gene names`)
+melt_phospho$log10PI<- log10(melt_phospho$value+1)
+p <- ggplot(melt_phospho, aes(x=`Positions within proteins`, y=log10PI, color=variable))+geom_point()+facet_wrap(~`Gene names`, scales = "free_x")+theme(axis.text.x = element_text(angle = 90))+
+  labs(title = "Plot of position of peptide on protein and peptide intensity", x="Position on Protein", y="Log10(Difference in Peptide Intensity, (t30-t0))")+scale_x_continuous()+scale_y_continuous(limits = c(0,10))
+pg <- ggplotly(p)
+pg
+p
+```
+
+## Publication plots
+
+For the publication several plots are made for the figure. For this the mCherry_Q6ZNE5 can be removed. In addition plots should take into account whether the protein is from the correct band or is just co-selected in the same band. Positions within the protein are labelled in each plot. TBK1 and ULK1 are separated by colour.
+
+### Phosphorylation site regardless of bands
+
+```{r}
+melt_phospho[c('User', 'Kinase', "Band")] <- str_split_fixed(melt_phospho$variable, '_', 3)
+phospho_sel <- subset(melt_phospho, `Gene names`!="mCherry_Q6ZNE5")#Remove mCherry identification
+#Changing alias names
+phospho_sel$target <- ""
+phospho_sel[phospho_sel$`Gene names`=="PIK3R4", "target"] <- "VPS15"
+phospho_sel[phospho_sel$`Gene names`=="PIK3C3", "target"] <- "VPS34"
+phospho_sel[phospho_sel$`Gene names`=="BECN1", "target"] <- "Beclin1"
+phospho_sel[phospho_sel$`Gene names`=="ATG14", "target"] <- "ATG14"
+
+phospho_sites <- phospho_sel %>% group_by(`Positions within proteins`, target) %>%
+  summarise(max = max(log10PI, na.rm=TRUE))
+
+
+p1 <- ggplot(phospho_sel, aes(x=`Positions within proteins`, y=log10PI))+
+  geom_col(width=0.1, color="black", position = position_identity())+
+  geom_point(shape=21, aes(fill=Kinase), size=4)+
+  geom_text(data=phospho_sites, aes(x=`Positions within proteins`, y=max+0.7, label=`Positions within proteins`), angle=90)+
+  scale_y_continuous(expand = c(0, 0), limits = c(0, NA))+
+  scale_x_continuous(breaks = scales::pretty_breaks())+
+  theme_bw()+
+  labs(y="Log10 Adjusted Peptide Intensity (30min-0min)", title = "Band≠Target")+
+  facet_wrap(~target, ncol = 2, scales = "free_x")
+```
+
+## Removing proteins that are not found in their appropriate band
+
+```{r}
+melt_phospho[c('User', 'Kinase', "Band")] <- str_split_fixed(melt_phospho$variable, '_', 3)
+phospho_sel <- subset(melt_phospho, `Gene names`!="mCherry_Q6ZNE5")#Remove mCherry identification
+#Changing alias names
+phospho_sel$target <- ""
+phospho_sel[phospho_sel$`Gene names`=="PIK3R4", "target"] <- "VPS15"
+phospho_sel[phospho_sel$`Gene names`=="PIK3C3", "target"] <- "VPS34"
+phospho_sel[phospho_sel$`Gene names`=="BECN1", "target"] <- "Beclin1"
+phospho_sel[phospho_sel$`Gene names`=="ATG14", "target"] <- "ATG14"
+
+#Band=target
+phospho_sel <- phospho_sel[phospho_sel$target==phospho_sel$Band,]
+
+phospho_sites <- phospho_sel %>% group_by(`Positions within proteins`, target) %>%
+  summarise(max = max(log10PI, na.rm=TRUE))
+
+
+p2 <- ggplot(phospho_sel, aes(x=`Positions within proteins`, y=log10PI))+
+  geom_col(width=0.1, color="black", position = position_identity())+
+  geom_point(shape=21, aes(fill=Kinase), size=4)+
+  geom_text(data=phospho_sites, aes(x=`Positions within proteins`, y=max+0.7, label=`Positions within proteins`), angle=90)+
+  scale_y_continuous(expand = c(0, 0), limits = c(0, NA))+
+  scale_x_continuous(labels = scales::label_number(accuracy = 1), breaks = scales::breaks_pretty())+
+  theme_bw()+
+  labs(y="Log10 Adjusted Peptide Intensity (30min-0min)", title = "Band=Target")+
+  facet_wrap(~target, ncol = 2, scales = "free_x")
+p2
+```
+
+```{r}
+ggarrange(p1, p2, ncol=1)
+```
